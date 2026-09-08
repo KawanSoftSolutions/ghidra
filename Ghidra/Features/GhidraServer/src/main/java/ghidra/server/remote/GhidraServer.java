@@ -15,18 +15,34 @@
  */
 package ghidra.server.remote;
 
-import static ghidra.server.remote.GhidraServer.AuthMode.*;
+import static ghidra.server.remote.GhidraServer.AuthMode.JAAS_LOGIN;
+import static ghidra.server.remote.GhidraServer.AuthMode.NO_AUTH_LOGIN;
+import static ghidra.server.remote.GhidraServer.AuthMode.PASSWORD_FILE_LOGIN;
+import static ghidra.server.remote.GhidraServer.AuthMode.PKI_LOGIN;
 
-import java.io.*;
-import java.net.*;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.InetAddress;
+import java.net.NetworkInterface;
+import java.net.ServerSocket;
+import java.net.SocketException;
+import java.net.UnknownHostException;
 import java.rmi.NoSuchObjectException;
 import java.rmi.RemoteException;
 import java.rmi.registry.LocateRegistry;
 import java.rmi.registry.Registry;
-import java.rmi.server.*;
+import java.rmi.server.RMIClientSocketFactory;
+import java.rmi.server.RMIServerSocketFactory;
+import java.rmi.server.UnicastRemoteObject;
 import java.security.cert.CertificateException;
-import java.util.*;
+import java.security.cert.X509Certificate;
+import java.util.Collection;
+import java.util.Date;
+import java.util.Enumeration;
+import java.util.List;
 
+import javax.net.ssl.X509ExtendedKeyManager;
 import javax.rmi.ssl.SslRMIClientSocketFactory;
 import javax.rmi.ssl.SslRMIServerSocketFactory;
 import javax.security.auth.Subject;
@@ -36,19 +52,32 @@ import javax.security.auth.login.FailedLoginException;
 import javax.security.auth.login.LoginException;
 import javax.security.auth.x500.X500Principal;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.bouncycastle.asn1.x509.GeneralName;
 
 import generic.jar.ResourceFile;
 import generic.random.SecureRandomFactory;
 import ghidra.framework.Application;
 import ghidra.framework.ApplicationConfiguration;
-import ghidra.framework.remote.*;
+import ghidra.framework.remote.GhidraObjectInputFilter;
+import ghidra.framework.remote.GhidraPrincipal;
+import ghidra.framework.remote.GhidraServerHandle;
+import ghidra.framework.remote.RemoteRepositoryServerHandle;
 import ghidra.net.DefaultKeyManagerFactory;
 import ghidra.net.DefaultSSLContextInitializer;
+import ghidra.net.DefaultTrustManagerFactory;
+import ghidra.net.PKIUtils;
 import ghidra.server.RepositoryManager;
 import ghidra.server.UserManager;
-import ghidra.server.security.*;
+import ghidra.server.security.AnonymousAuthenticationModule;
+import ghidra.server.security.AuthenticationModule;
+import ghidra.server.security.JAASAuthenticationModule;
+import ghidra.server.security.Krb5ActiveDirectoryAuthenticationModule;
+import ghidra.server.security.PKIAuthenticationModule;
+import ghidra.server.security.PasswordFileAuthenticationModule;
+import ghidra.server.security.SSHAuthenticationModule;
 import ghidra.server.stream.BlockStreamServer;
 import ghidra.server.stream.RemoteBlockStreamHandle;
 import ghidra.util.SystemUtilities;
@@ -70,6 +99,8 @@ public class GhidraServer extends UnicastRemoteObject implements GhidraServerHan
 	private static final String TLS_SERVER_PROTOCOLS_PROPERTY = "ghidra.tls.server.protocols";
 	private static final String TLS_ENABLED_CIPHERS_PROPERTY = "jdk.tls.server.cipherSuites";
 
+	private static final String LOCALHOST_ADDRESS = "127.0.0.1";
+
 	private static SslRMIServerSocketFactory serverSocketFactory;
 	private static SslRMIClientSocketFactory clientSocketFactory;
 	private static InetAddress bindAddress;
@@ -78,7 +109,8 @@ public class GhidraServer extends UnicastRemoteObject implements GhidraServerHan
 
 	private static String HELP_FILE = "ServerHelp.txt";
 	private static String USAGE_ARGS =
-		"[-ip <hostname>] [-i #.#.#.#] [-p#] [-n] [-a#] [-d<ad_domain>] [-e<days>] [-jaas <config_file>] [-u] [-autoProvision] [-anonymous] [-ssh] <repository_path>";
+		"[-ip <hostname>] [-i #.#.#.#] [-p#] [-n] [-a#] [-d<ad_domain>]" +
+			" [-e<days>] [-jaas <config_file>] [-u] [-autoProvision] [-anonymous] [-ssh] <repository_path>";
 
 	private static final String RMI_SERVER_PROPERTY = "java.rmi.server.hostname";
 
@@ -378,7 +410,7 @@ public class GhidraServer extends UnicastRemoteObject implements GhidraServerHan
 			RemoteLoggingUtil.log(
 				"Failed to instantiate RepositoryServerHandleImpl: " + e.getMessage(),
 				username);
-			e.printStackTrace();
+			RemoteLoggingUtil.logException(e);
 			throw new RemoteException("Remote server handle error (see server log)");
 		}
 	}
@@ -472,7 +504,7 @@ public class GhidraServer extends UnicastRemoteObject implements GhidraServerHan
 
 	private static String initRemoteAccessHostname() throws UnknownHostException {
 		String hostname = System.getProperty(RMI_SERVER_PROPERTY);
-		if (hostname == null) {
+		if (StringUtils.isBlank(hostname)) {
 			if (bindAddress != null) {
 				hostname = bindAddress.getHostAddress();
 			}
@@ -481,7 +513,7 @@ public class GhidraServer extends UnicastRemoteObject implements GhidraServerHan
 				if (localhost.isLoopbackAddress()) {
 					localhost = findHost();
 					if (localhost == null) {
-						log.fatal("Can't find host ip address!");
+						log.fatal("Failed to identify host interface IP address");
 						System.exit(-1);
 					}
 				}
@@ -499,7 +531,7 @@ public class GhidraServer extends UnicastRemoteObject implements GhidraServerHan
 		}
 
 		ResourceFile serverRoot = new ResourceFile(Application.getInstallationDirectory(),
-			SystemUtilities.isInDevelopmentMode() ? "ghidra/Ghidra/RuntimeScripts/Common/server"
+			SystemUtilities.isInDevelopmentMode() ? "ghidra/Ghidra/RuntimeScripts/server"
 					: "server");
 		if (serverRoot.getFile(false) == null) {
 			System.err.println(
@@ -539,6 +571,7 @@ public class GhidraServer extends UnicastRemoteObject implements GhidraServerHan
 		int defaultPasswordExpiration = -1;
 		boolean autoProvision = false;
 		File jaasConfigFile = null;
+		String hostname = null;
 
 		// Network name resolution disabled by default
 		InetNameLookup.setLookupEnabled(false);
@@ -590,7 +623,6 @@ public class GhidraServer extends UnicastRemoteObject implements GhidraServerHan
 			}
 			else if (s.startsWith("-ip")) { // setting server remote access hostname
 				int nextArgIndex = i + 1;
-				String hostname;
 				if (s.length() == 3 && nextArgIndex < args.length) {
 					hostname = args[++i];
 				}
@@ -699,7 +731,7 @@ public class GhidraServer extends UnicastRemoteObject implements GhidraServerHan
 			}
 		}
 
-		if (rootPath == null) {
+		if (StringUtils.isBlank(rootPath)) {
 			displayUsage("Repository directory must be specified!");
 			System.exit(-1);
 		}
@@ -719,6 +751,13 @@ public class GhidraServer extends UnicastRemoteObject implements GhidraServerHan
 				displayUsage("JAAS config file argument (-jaas <configfile>) not specified");
 				System.exit(-1);
 			}
+		}
+
+		if (authMode == PKI_LOGIN && StringUtils.isBlank(
+			System.getProperty(DefaultTrustManagerFactory.GHIDRA_CACERTS_PATH_PROPERTY))) {
+			displayUsage("PKI authentication (-a2) requires the trusted CA certificates file " +
+				"to be specified with the 'ghidra.cacerts' VM property");
+			System.exit(-1);
 		}
 
 		try {
@@ -769,63 +808,60 @@ public class GhidraServer extends UnicastRemoteObject implements GhidraServerHan
 		// }
 
 		try {
-			// Ensure that remote access hostname is properly set for RMI registration
-			String hostname = initRemoteAccessHostname();
 
 			log.info("Ghidra Server " + Application.getApplicationVersion());
-			log.info("   Server remote access address: " + hostname);
-			if (bindAddress == null) {
-				log.info("   Server listening on all interfaces");
-			}
-			else {
-				log.info("   Server listening on interface: " + bindAddress.getHostAddress());
-			}
 
 			String preferredKeyStore = DefaultKeyManagerFactory.getPreferredKeyStore();
-			if (preferredKeyStore == null) {
+			if (StringUtils.isBlank(preferredKeyStore)) {
+				// When keystore has not been specified - use self-signed certificate with localhost/127.0.0.1 only
+				log.warn("Ghidra Server keystore not identified.");
+				log.warn("Server will bind to 127.0.0.1 listening to localhost requests only.");
 
-				// keystore has not been identified - use self-signed certificate
+				if (hostname != null) {
+					log.warn("   -ip hostname option ignored when self-signed certificate is used");
+				}
+				hostname = LOCALHOST_ADDRESS;
+
+				if (bindAddress != null && !bindAddress.isLoopbackAddress()) {
+					log.warn(
+						"   -i non-loopback interface bind address ignored: " + bindAddress);
+				}
+				bindAddress = InetAddress.getByName(LOCALHOST_ADDRESS);
+
+				System.setProperty(RMI_SERVER_PROPERTY, hostname);
+
+				// Setup for self-signed server certificate generation bound to localhost
 				log.info("   Generating self-signed certificate...");
-				log.info("   Subject Alternative Names:");
-				log.info("      " + hostname);
-
 				DefaultKeyManagerFactory.setDefaultIdentity(new X500Principal("CN=GhidraServer"));
 				DefaultKeyManagerFactory.addSubjectAlternativeName(hostname);
-
-				// Collect alternate hostnames for inclusion in certificate
-				Set<String> altNames = new TreeSet<>();
-				Enumeration<NetworkInterface> nets = NetworkInterface.getNetworkInterfaces();
-				while (nets.hasMoreElements()) {
-					NetworkInterface netint = nets.nextElement();
-					Enumeration<InetAddress> addrs = netint.getInetAddresses();
-					while (addrs.hasMoreElements()) {
-						InetAddress addr = addrs.nextElement();
-						altNames.add(addr.getHostAddress());
-						altNames.add(addr.getHostName());
-						altNames.add(addr.getCanonicalHostName());
-					}
-				}
-				altNames.remove(hostname);
-				for (String name : altNames) {
-					log.info("      " + name);
-					DefaultKeyManagerFactory.addSubjectAlternativeName(name);
+				if (!hostname.equals(bindAddress.getHostAddress())) {
+					DefaultKeyManagerFactory
+							.addSubjectAlternativeName(bindAddress.getHostAddress());
 				}
 			}
 			else {
 				log.info("   Using server certificate keystore: " + preferredKeyStore);
+				hostname = initRemoteAccessHostname();
+
+				log.info("   Server remote access address: " + hostname);
+				if (bindAddress == null) {
+					log.info("   Server listening on all interfaces");
+				}
+				else {
+					log.info("   Server listening on interface: " + bindAddress.getHostAddress());
+				}
 			}
 
-			if (!DefaultKeyManagerFactory.initialize()) {
+			if (!DefaultKeyManagerFactory.initialize(true)) {
 				log.fatal("Failed to initialize PKI/SSL keystore");
 				System.exit(0);
-				return;
 			}
-
-			// RMIClassServer.startServer(classSvrPort);
-
-			// String codeBaseProp = "http://" +
-			// localhost.getCanonicalHostName() + ":" + classSvrPort + "/";
-			// System.setProperty(RMI_CODEBASE_PROPERTY, codeBaseProp);
+			
+			int signingKeyCount = logServerCertificates("RSA") + logServerCertificates("ECDSA");
+			if (signingKeyCount == 0) {
+				log.fatal("Failed to locate a certificate with digital-signature usage");
+				System.exit(0);
+			}
 
 			log.info("   RMI Registry port: " + ServerPortFactory.getRMIRegistryPort());
 			log.info("   RMI SSL port: " + ServerPortFactory.getRMISSLPort());
@@ -833,8 +869,7 @@ public class GhidraServer extends UnicastRemoteObject implements GhidraServerHan
 			log.info("   Block Stream compression: " +
 				(RemoteBlockStreamHandle.enableCompressedSerializationOutput ? "enabled"
 						: "disabled"));
-//			log.info("   Class server port: " + ??);
-			log.info("   Root: " + rootPath);
+			log.info("   Root: " + serverRoot.getAbsolutePath());
 			log.info("   Auth: " + authMode.getDescription());
 			if (authMode == PASSWORD_FILE_LOGIN && defaultPasswordExpiration >= 0) {
 				log.info("   Default password expiration: " +
@@ -900,6 +935,81 @@ public class GhidraServer extends UnicastRemoteObject implements GhidraServerHan
 			log.fatal("Server error: " + t.getMessage(), t);
 			System.exit(-1);
 		}
+	}
+	
+	/**
+	 * Log server certificates
+	 * @param keyType
+	 * @return number of certificates that support signing
+	 */
+	private static int logServerCertificates(String keyType) {
+
+		X509ExtendedKeyManager km = DefaultKeyManagerFactory.getKeyManager();
+		String[] aliases = km.getServerAliases(keyType, null);
+		if (aliases == null) {
+			return 0;
+		}
+
+		String pad = "      ";
+		Date now = new Date();
+		int signingCount = 0;
+
+		for (String alias : aliases) {
+
+			X509Certificate[] certificateChain = km.getCertificateChain(alias);
+			X509Certificate x509Cert = certificateChain[certificateChain.length - 1];
+
+			if (x509Cert.getKeyUsage()[0]) {
+				++signingCount;
+			}
+
+			X500Principal subj = x509Cert.getSubjectX500Principal();
+			X500Principal issuer = x509Cert.getIssuerX500Principal();
+
+			String label = "'" + alias + "' (" + keyType + "): ";
+			if (now.compareTo(x509Cert.getNotAfter()) > 0) {
+				log.error(
+					pad + label + subj + ", issued by " + issuer +
+						", S/N " + x509Cert.getSerialNumber().toString(16) + ", expired " +
+						x509Cert.getNotAfter() + " **EXPIRED**");
+			}
+			else {
+				log.info(
+					pad + label + subj + ", issued by " + issuer +
+						", S/N " + x509Cert.getSerialNumber().toString(16) + ", expires " +
+						x509Cert.getNotAfter());
+			}
+
+			log.info(pad + "Key Usage: " + PKIUtils.formatKeyUsage(x509Cert));
+
+			boolean foundEntries = false;
+			try {
+				Collection<List<?>> sanList = x509Cert.getSubjectAlternativeNames();
+				if (sanList != null) {
+					for (List<?> sanEntry : sanList) {
+					Integer type = (Integer) sanEntry.get(0);
+					Object value = sanEntry.get(1);
+					if (type == GeneralName.iPAddress || type == GeneralName.dNSName) {
+						if (!foundEntries) {
+							log.info(pad + "Subject Alternative Names:");
+						}
+						foundEntries = true;
+						log.info(pad + "   " + value);
+					}
+				}
+			}
+			}
+			catch (Exception e) {
+				log.fatal("Error reading certificate SANs: " + e.getMessage());
+				System.exit(-1);
+			}
+
+			// Generally a server signing cert needs SAN entries
+			if (x509Cert.getKeyUsage()[0] && !foundEntries) {
+				log.warn(pad + "** No Hostname or IP Address SANs are defined **");
+			}
+		}
+		return signingCount;
 	}
 
 	private static String[] getEnabledTlsProtocols() {

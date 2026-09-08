@@ -86,7 +86,7 @@ void Funcdata::clear(void)
 {				// Clear everything associated with decompilation (analysis)
 
   flags &= ~(highlevel_on|blocks_generated|processing_started|typerecovery_start|typerecovery_on|
-      double_precis_on|restart_pending);
+      double_precis_on|restart_pending|normalization_on);
   clean_up_index = 0;
   high_level_index = 0;
   cast_phase_index = 0;
@@ -172,8 +172,6 @@ void Funcdata::stopProcessing(void)
 {
   flags |= processing_complete;
   obank.destroyDead();		// Free up anything in the dead list
-  if (!isJumptableRecoveryOn())
-    issueDatatypeWarnings();
 #ifdef CPUI_STATISTICS
   glb->stats->process(*this);
 #endif
@@ -242,7 +240,7 @@ void Funcdata::spacebase(void)
     for(i=0;i<numspace;++i) {
       const VarnodeData &point(spc->getSpacebase(i));
 				// Find input varnode at this size and location
-      Datatype *ct = glb->types->getTypeSpacebase(spc,getAddress());
+      Datatype *ct = glb->types->getTypeSpacebase(spc,localmap->getId());
       Datatype *ptr = glb->types->getTypePointer(point.size,ct,spc->getWordSize());
     
       iter = vbank.beginLoc(point.size,Address(point.space,point.offset));
@@ -315,7 +313,7 @@ Varnode *Funcdata::constructSpacebaseInput(AddrSpace *id)
   if (id->numSpacebase() == 0)
     throw LowlevelError("Unable to construct pointer into space: "+id->getName());
   const VarnodeData &point(id->getSpacebase(0));
-  Datatype *ct = glb->types->getTypeSpacebase(id,getAddress());
+  Datatype *ct = glb->types->getTypeSpacebase(id,localmap->getId());
   Datatype *ptr = glb->types->getTypePointer(point.size,ct,id->getWordSize());
   spacePtr = newVarnode(point.size, point.getAddr(), ptr);
   spacePtr = setInputVarnode(spacePtr);
@@ -332,7 +330,7 @@ Varnode *Funcdata::constructSpacebaseInput(AddrSpace *id)
 Varnode *Funcdata::constructConstSpacebase(AddrSpace *id)
 
 {
-  Datatype *ct = glb->types->getTypeSpacebase(id,Address());
+  Datatype *ct = glb->types->getTypeSpacebase(id,0);
   Datatype *ptr = glb->types->getTypePointer(id->getAddrSize(),ct,id->getWordSize());
   Varnode *spacePtr = newConstant(id->getAddrSize(),0);
   spacePtr->updateType(ptr,true,true);
@@ -357,12 +355,12 @@ Varnode *Funcdata::constructConstSpacebase(AddrSpace *id)
 /// \param rampoint is the constant pointer interpreted as an Address
 /// \param origval is the constant
 /// \param origsize is the size of the constant
-void Funcdata::spacebaseConstant(PcodeOp *op,int4 slot,SymbolEntry *entry,const Address &rampoint,uintb origval,int4 origsize)
+void Funcdata::spacebaseConstant(PcodeOp *op,int4 slot,MapEntry *entry,const Address &rampoint,uintb origval,int4 origsize)
 
 {
   int4 sz = rampoint.getAddrSize();
   AddrSpace *spaceid = rampoint.getSpace();
-  Datatype *sb_type = glb->types->getTypeSpacebase(spaceid,Address());
+  Datatype *sb_type = glb->types->getTypeSpacebase(spaceid,entry->getSymbol()->getScope()->getId());
   sb_type = glb->types->getTypePointer(sz,sb_type,spaceid->getWordSize());
   Varnode *spacebase_vn,*outvn,*newconst;
 
@@ -404,7 +402,7 @@ void Funcdata::spacebaseConstant(PcodeOp *op,int4 slot,SymbolEntry *entry,const 
   // Make sure newconstant and extra preserve origval in address units
   uintb newconstoff = origval - extra;		// everything is already in address units
   newconst = newConstant(sz,newconstoff);
-  newconst->setPtrCheck();	// No longer need to check this constant as a pointer
+  newconst->setSymbolCheck(Varnode::symcheck_complete);	// No longer need to check this constant as symbolref
   if (spaceid->isTruncated())
     addOp->setPtrFlow();
   opSetInput(addOp,spacebase_vn,0);
@@ -427,7 +425,7 @@ void Funcdata::spacebaseConstant(PcodeOp *op,int4 slot,SymbolEntry *entry,const 
     else
       opSetOpcode(extraOp,CPUI_INT_ADD);
     Varnode *extconst = newConstant(sz,extra);
-    extconst->setPtrCheck();
+    extconst->setSymbolCheck(Varnode::symcheck_complete);
     opSetInput(extraOp,outvn,0);
     opSetInput(extraOp,extconst,1);
     outvn = extraOp->getOut();
@@ -472,13 +470,12 @@ void Funcdata::clearCallSpecs(void)
   qlst.clear();			// Delete list of pointers
 }
 
-void Funcdata::issueDatatypeWarnings(void)
+void Funcdata::issueDatatypeWarning(Datatype *dt)
 
 {
-  list<DatatypeWarning>::const_iterator iter;
-  for(iter=glb->types->beginWarnings();iter!=glb->types->endWarnings();++iter) {
-    warningHeader((*iter).getWarning());
-  }
+  string warn = glb->types->findWarning(dt);
+  if (warn.size() > 0)
+    warningHeader(warn);
 }
 
 FuncCallSpecs *Funcdata::getCallSpecs(const PcodeOp *op) const
@@ -615,9 +612,9 @@ void Funcdata::decodeJumpTable(Decoder &decoder)
 {
   uint4 elemId = decoder.openElement(ELEM_JUMPTABLELIST);
   while(decoder.peekElement() != 0) {
-    JumpTable *jt = new JumpTable();
+    unique_ptr<JumpTable> jt(new JumpTable());
     jt->decode(decoder);
-    jumpvec.push_back(jt);
+    jumpvec.push_back(jt.release());
   }
   decoder.closeElement(elemId);
 }
@@ -733,8 +730,9 @@ void Funcdata::encodeTree(Encoder &encoder) const
 /// tree is also emitted.
 /// \param encoder is the stream encoder
 /// \param id is the unique id associated with the function symbol
-/// \param savetree is \b true if the p-code tree should be emitted
-void Funcdata::encode(Encoder &encoder,uint8 id,bool savetree) const
+/// \param saveTree is \b true if the p-code tree should be emitted
+/// \param saveOverrides is \b true if information about overrides should be emitted
+void Funcdata::encode(Encoder &encoder,uint8 id,bool saveTree,bool saveOverrides) const
 
 {
   encoder.openElement(ELEM_FUNCTION);
@@ -750,13 +748,14 @@ void Funcdata::encode(Encoder &encoder,uint8 id,bool savetree) const
     localmap->encodeRecursive(encoder,false);	// Save scope and all subscopes
   }
 
-  if (savetree) {
+  if (saveTree) {
     encodeTree(encoder);
     encodeHigh(encoder);
   }
   encodeJumpTable(encoder);
   funcp.encode(encoder);		// Must be saved after database
-  localoverride.encode(encoder,glb);
+  if (saveOverrides)
+    localoverride.encode(encoder,glb);
   encoder.closeElement(ELEM_FUNCTION);
 }
 

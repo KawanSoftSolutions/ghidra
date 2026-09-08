@@ -440,7 +440,9 @@ class GhidraScriptActionManager {
 					}
 
 					ZipEntry entry = entries.nextElement();
-					monitor.setMessage("Extracting " + entry.getName() + "...");
+					String name = entry.getName();
+					FileUtilities.getSecureFile(versionedExtractDir, name);
+					monitor.setMessage("Extracting " + name + "...");
 					writeZipEntry(versionedExtractDir, entry, zipFileObject.getInputStream(entry));
 					monitor.incrementProgress(1);
 				}

@@ -79,7 +79,7 @@ public class LabelMgrPluginScreenShots extends GhidraScreenShotGenerator {
 	public void testChooseNamespace() {
 		runSwingLater(() -> {
 			NamespaceChooserDialog dialog = new NamespaceChooserDialog();
-			dialog.getNameSpace(program);
+			dialog.getNamespace(program);
 		});
 		waitForDialogComponent(NamespaceChooserDialog.class);
 		captureDialog();

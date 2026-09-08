@@ -24,7 +24,6 @@ import java.util.List;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
-import javax.swing.event.ChangeEvent;
 import javax.swing.table.TableCellEditor;
 
 import docking.DialogComponentProvider;
@@ -146,21 +145,6 @@ public abstract class AbstractSettingsDialog extends DialogComponentProvider {
 		addButton(newApplyButton);
 
 		addCancelButton();
-
-		MouseAdapter listener = new MouseAdapter() {
-
-			@Override
-			public void mousePressed(MouseEvent e) {
-
-				if (settingsTable.isEditing()) {
-					settingsTable.editingStopped(new ChangeEvent(this));
-				}
-			}
-		};
-
-		okButton.addMouseListener(listener);
-		newApplyButton.addMouseListener(listener);
-		cancelButton.addMouseListener(listener);
 	}
 
 	private String getHexModePropertyName(SettingsDefinition settingsDef) {
@@ -215,7 +199,7 @@ public abstract class AbstractSettingsDialog extends DialogComponentProvider {
 		settingsTable.setColumnSelectionAllowed(false);
 
 		// make the rows a bit taller to allow the integer text field editor to render correctly
-		settingsTable.setRowHeight(22);
+		settingsTable.setRowPadding(4);
 
 		// disable user sorting and column adding (we don't expect enough data to require sorting)
 		settingsTable.getTableHeader().setReorderingAllowed(false);
@@ -280,12 +264,17 @@ public abstract class AbstractSettingsDialog extends DialogComponentProvider {
 	}
 
 	@Override
-	protected void okCallback() {
+	protected void okCallback(boolean isMouseClick) {
 
-		// prevent users from closing the dialog when pressing Enter to confirm an edit
+		// When the OK button is pressed we want to finish any open edits.  However, if this call is
+		// from the user pressing Enter, then do not close the dialog after finishing the edit. This
+		// allows users to press Enter to close the combo box edit without closing the dialog.
 		if (settingsTable.isEditing()) {
 			settingsTable.editingStopped(null);
-			return;
+
+			if (!isMouseClick) {
+				return;
+			}
 		}
 
 		apply();
@@ -313,7 +302,7 @@ public abstract class AbstractSettingsDialog extends DialogComponentProvider {
 	protected abstract String[] getSuggestedValues(StringSettingsDefinition settingsDefinition);
 
 	/**
-	 * Apply changes to settings.  This method must be ov
+	 * Apply changes to settings.
 	 * @throws CancelledException thrown if apply operation cancelled
 	 */
 	protected abstract void applySettings() throws CancelledException;
@@ -360,7 +349,7 @@ public abstract class AbstractSettingsDialog extends DialogComponentProvider {
 		StringChoices choices = (StringChoices) value;
 		int selectedChoice = choices.getSelectedValueIndex();
 		if (defaultSettings == null) {
-			if (selectedChoice == 0) { // blank choosen
+			if (selectedChoice == 0) { // blank chosen
 				settings.clearSetting(def.getName());
 				return;
 			}
@@ -730,7 +719,6 @@ public abstract class AbstractSettingsDialog extends DialogComponentProvider {
 
 	class StringSettingsComboBox extends GComboBox<String> {
 		StringSettingsComboBox() {
-			super();
 		}
 	}
 

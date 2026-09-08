@@ -115,8 +115,7 @@ public class AndroidProjectCreator {
 	}
 
 	private void processListing(File outputDirectory, GFileSystem fs, List<GFile> listing,
-			TaskMonitor monitor)
-			throws IOException, CancelledException {
+			TaskMonitor monitor) throws IOException, CancelledException {
 		for (GFile child : listing) {
 
 			String childName = child.getName();
@@ -130,7 +129,7 @@ public class AndroidProjectCreator {
 				if (childName.equals("META-INF")) {
 					continue;
 				}
-				File subDir = new File(outputDirectory, childName);
+				File subDir = FileUtilities.getSecureFile(outputDirectory, childName);
 				FileUtilities.checkedMkdir(subDir);
 				processListing(subDir, fs, child.getListing(), monitor);
 				continue;
@@ -219,8 +218,7 @@ public class AndroidProjectCreator {
 
 		try (InputStream is = inputFile.getInputStream()) {
 			FileUtilities.checkedMkdirs(outputDirectory);
-			File destFile = new File(outputDirectory, outputName);
-
+			File destFile = FileUtilities.getSecureFile(outputDirectory, outputName);
 			monitor.setMessage("Copying [" + inputFile.getName() + "] to Eclipse project...");
 			FileUtilities.copyStreamToFile(is, destFile, false, monitor);
 

@@ -16,7 +16,8 @@
 package ghidra.framework.plugintool.util;
 
 import java.lang.reflect.Method;
-import java.net.URL;
+import java.net.*;
+import java.nio.file.Path;
 import java.util.*;
 
 import generic.jar.ResourceFile;
@@ -45,7 +46,7 @@ public class PluginDescription implements Comparable<PluginDescription> {
 	 * @return {@link PluginDescription}
 	 */
 	public static PluginDescription getPluginDescription(Class<? extends Plugin> c) {
-		// TODO: sync the hashmap?
+		// Note: the cache is not synchronized
 		PluginDescription cachedPD =
 			CACHE.computeIfAbsent(c, PluginDescription::createPluginDescription);
 		return cachedPD;
@@ -116,21 +117,40 @@ public class PluginDescription implements Comparable<PluginDescription> {
 	 * @return path to the source file
 	 */
 	public String getSourceLocation() {
-		String path = url.getFile();
-		if ("jar".equals(url.getProtocol())) {
-			int i = path.indexOf('!');
-			if (i >= 0) {
-				path = path.substring(0, i);
-			}
-			String fileProtoPrefix = "file:";
-			if (path.startsWith(fileProtoPrefix)) {
-				path = path.substring(fileProtoPrefix.length() + 1);
-			}
-			return '/' + path;
+		try {
+			return convertToSourceLocation(url);
 		}
-		String classpath = pluginClass.getName();
-		path = path.substring(0, path.length() - classpath.length() - DOTCLASS_EXT.length() - 1);
-		return '/' + path;
+		catch (URISyntaxException e) {
+			Msg.error(this, "Unexpected bad url: " + url);
+			return "<bad source location>";
+		}
+	}
+
+	private static String convertToSourceLocation(URL url) throws URISyntaxException {
+
+		URI uri;
+		if ("jar".equals(url.getProtocol())) {
+
+			// strip off the jar protocol
+			String file = url.getFile();
+			uri = URI.create(file);
+		}
+		else {
+			uri = url.toURI();
+		}
+
+		String parent = Path.of(uri).getParent().toString();
+
+		// Check for a file:/ path pointing to a class inside of a jar file
+		String jarSeparator = ".jar!";
+		int index = parent.indexOf(jarSeparator);
+		if (index != -1) {
+			// we want to return just the path to the jar file without the package path
+			int bangIndex = index + jarSeparator.length() - 1;
+			parent = parent.substring(0, bangIndex);
+		}
+
+		return parent;
 	}
 
 	/**

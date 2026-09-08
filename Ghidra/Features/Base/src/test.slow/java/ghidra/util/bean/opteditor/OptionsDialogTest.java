@@ -139,7 +139,7 @@ public class OptionsDialogTest extends AbstractGhidraHeadedIntegrationTest {
 		// close the options
 		final JButton okButton = findButtonByText(dialog.getComponent(), "OK");
 		assertTrue(okButton.isEnabled());
-		runSwing(() -> okButton.getActionListeners()[0].actionPerformed(null));
+		pressButton(okButton);
 
 		assertTrue(!dialog.isShowing());
 
@@ -188,7 +188,7 @@ public class OptionsDialogTest extends AbstractGhidraHeadedIntegrationTest {
 		// close the options
 		final JButton okButton = findButtonByText(dialog.getComponent(), "OK");
 		assertTrue(okButton.isEnabled());
-		runSwing(() -> okButton.getActionListeners()[0].actionPerformed(null));
+		pressButton(okButton);
 
 		assertTrue(!dialog.isShowing());
 
@@ -706,7 +706,7 @@ public class OptionsDialogTest extends AbstractGhidraHeadedIntegrationTest {
 
 		pressButtonByText(dialog, "Cancel", false);
 		OptionDialog yesNoDialog = waitForDialogComponent(OptionDialog.class);
-		pressButtonByText(yesNoDialog.getComponent(), "No");
+		pressButtonByText(yesNoDialog.getComponent(), "Don't Save");
 
 		Options options = tool.getOptions(ToolConstants.TOOL_OPTIONS);
 		GhidraOptions.CURSOR_MOUSE_BUTTON_NAMES mouseButton =

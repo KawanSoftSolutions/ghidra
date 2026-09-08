@@ -488,7 +488,14 @@ public class DialogComponentProvider
 		okButton.setMnemonic('K');
 		okButton.setName("OK");
 		okButton.getAccessibleContext().setAccessibleName("OK");
-		okButton.addActionListener(e -> okCallback());
+		okButton.addActionListener(e -> {
+
+			int mods = e.getModifiers();
+			// Note: action event does not use extended modifiers; use the deprecated values
+			@SuppressWarnings("deprecation")
+			boolean isMouseClick = (mods & InputEvent.BUTTON1_MASK) == InputEvent.BUTTON1_MASK;
+			okCallback(isMouseClick);
+		});
 		addButton(okButton);
 	}
 
@@ -682,6 +689,9 @@ public class DialogComponentProvider
 	 */
 	public void setAccessibleDescription(String description) {
 		this.accessibleDescription = description;
+		if (dialog != null) {
+			dialog.getAccessibleContext().setAccessibleDescription(description);
+		}
 	}
 
 	private void doSetStatusText(String text, MessageType type, boolean alert) {
@@ -918,6 +928,15 @@ public class DialogComponentProvider
 	 */
 	protected void okCallback() {
 		Msg.debug(this, "Ok button pressed");
+	}
+
+	/**
+	 * A version of the OK callback that allows clients to know if the action is a result of a 
+	 * mouse click or the Enter key.
+	 * @param mouseClick true if the mouse clicked the OK button
+	 */
+	protected void okCallback(boolean mouseClick) {
+		okCallback();
 	}
 
 	/**
@@ -1324,6 +1343,10 @@ public class DialogComponentProvider
 	 * @param action the action
 	 */
 	public void addAction(DockingActionIf action) {
+		if (dialogActions.contains(action)) {
+			return; // protect from repeated adding
+		}
+
 		dialogActions.add(action);
 		addToolbarAction(action);
 		popupManager.addAction(action);
@@ -1509,7 +1532,10 @@ public class DialogComponentProvider
 		@Override
 		public boolean isEnabledForContext(ActionContext context) {
 			ActionContextProvider contextProvider = context.getContextProvider();
-			return provider == contextProvider;
+			if (provider != contextProvider) {
+				return false;
+			}
+			return dockingAction.isEnabledForContext(context);
 		}
 	}
 }
